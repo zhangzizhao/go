@@ -386,20 +386,6 @@ func (v *vcsCmd) tagSync(dir, tag string) error {
 	if v.tagSyncCmd == "" {
 		return nil
 	}
-	if tag != "" {
-		for _, tc := range v.tagLookupCmd {
-			out, err := v.runOutput(dir, tc.cmd, "tag", tag)
-			if err != nil {
-				return err
-			}
-			re := regexp.MustCompile(`(?m-s)` + tc.pattern)
-			m := re.FindStringSubmatch(string(out))
-			if len(m) > 1 {
-				tag = m[1]
-				break
-			}
-		}
-	}
 	if tag == "" && v.tagSyncDefault != "" {
 		return v.run(dir, v.tagSyncDefault)
 	}
@@ -463,6 +449,9 @@ type repoRoot struct {
 	// root is the import path corresponding to the root of the
 	// repository
 	root string
+
+	// revision to sync to after download
+	revision string
 }
 
 var httpPrefixRE = regexp.MustCompile(`^https?:`)
@@ -567,9 +556,10 @@ func repoRootForImportPathStatic(importPath, scheme string) (*repoRoot, error) {
 			}
 		}
 		rr := &repoRoot{
-			vcs:  vcs,
-			repo: match["repo"],
-			root: match["root"],
+			vcs:      vcs,
+			repo:     match["repo"],
+			root:     match["root"],
+			revision: strings.TrimPrefix(match["revision"], "#"),
 		}
 		return rr, nil
 	}
@@ -639,10 +629,18 @@ func repoRootForImportDynamic(importPath string) (*repoRoot, error) {
 	if !strings.Contains(metaImport.RepoRoot, "://") {
 		return nil, fmt.Errorf("%s: invalid repo root %q; no scheme", urlStr, metaImport.RepoRoot)
 	}
+
+	var revision string
+	revRe := regexp.MustCompile("#([^ ]+)$").FindAllString(importPath, 1)
+	if len(revRe) == 1 {
+		revision = strings.TrimPrefix(revRe[0], "#")
+	}
+
 	rr := &repoRoot{
-		vcs:  vcsByCmd(metaImport.VCS),
-		repo: metaImport.RepoRoot,
-		root: metaImport.Prefix,
+		vcs:      vcsByCmd(metaImport.VCS),
+		repo:     metaImport.RepoRoot,
+		root:     metaImport.Prefix,
+		revision: revision,
 	}
 	if rr.vcs == nil {
 		return nil, fmt.Errorf("%s: unknown vcs %q", urlStr, metaImport.VCS)
@@ -708,7 +706,7 @@ var vcsPaths = []*vcsPath{
 	// Github
 	{
 		prefix: "github.com/",
-		re:     `^(?P<root>github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)(/[A-Za-z0-9_.\-]+)*$`,
+		re:     `^(?P<root>github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)(/[A-Za-z0-9_.\-]+)*(?P<revision>#[^ ]+)?$`,
 		vcs:    "git",
 		repo:   "https://{root}",
 		check:  noVCSSuffix,

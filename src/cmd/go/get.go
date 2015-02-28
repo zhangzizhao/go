@@ -265,9 +265,9 @@ func download(arg string, stk *importStack, getTestDeps bool) {
 // to make the first copy of or update a copy of the given package.
 func downloadPackage(p *Package) error {
 	var (
-		vcs            *vcsCmd
-		repo, rootPath string
-		err            error
+		vcs                      *vcsCmd
+		repo, rootPath, revision string
+		err                      error
 	)
 	if p.build.SrcRoot != "" {
 		// Directory exists.  Look for checkout along path to src.
@@ -283,6 +283,7 @@ func downloadPackage(p *Package) error {
 			if remote, err := vcs.remoteRepo(vcs, dir); err == nil {
 				if rr, err := repoRootForImportPath(p.ImportPath); err == nil {
 					repo := rr.repo
+					revision = rr.revision
 					if rr.vcs.resolveRepo != nil {
 						resolved, err := rr.vcs.resolveRepo(rr.vcs, dir, repo)
 						if err == nil {
@@ -302,7 +303,7 @@ func downloadPackage(p *Package) error {
 		if err != nil {
 			return err
 		}
-		vcs, repo, rootPath = rr.vcs, rr.repo, rr.root
+		vcs, repo, rootPath, revision = rr.vcs, rr.repo, rr.root, rr.revision
 	}
 
 	if p.build.SrcRoot == "" {
@@ -319,6 +320,9 @@ func downloadPackage(p *Package) error {
 		p.build.PkgRoot = filepath.Join(list[0], "pkg")
 	}
 	root := filepath.Join(p.build.SrcRoot, rootPath)
+	if revision != "" {
+		root += "#" + revision
+	}
 	// If we've considered this repository already, don't do it again.
 	if downloadRootCache[root] {
 		return nil
@@ -326,7 +330,11 @@ func downloadPackage(p *Package) error {
 	downloadRootCache[root] = true
 
 	if buildV {
-		fmt.Fprintf(os.Stderr, "%s (download)\n", rootPath)
+		if revision != "" {
+			fmt.Fprintf(os.Stderr, "%s#%s (download)\n", rootPath, revision)
+		} else {
+			fmt.Fprintf(os.Stderr, "%s (download)\n", rootPath)
+		}
 	}
 
 	// Check that this is an appropriate place for the repo to be checked out.
@@ -366,19 +374,25 @@ func downloadPackage(p *Package) error {
 		return nil
 	}
 
-	// Select and sync to appropriate version of the repository.
-	tags, err := vcs.tags(root)
-	if err != nil {
-		return err
+	if revision != "" {
+		// Sync to repository revision.
+		if err := vcs.tagSync(root, revision); err != nil {
+			return err
+		}
+	} else {
+		// Select and sync to appropriate version of the repository.
+		tags, err := vcs.tags(root)
+		if err != nil {
+			return err
+		}
+		vers := runtime.Version()
+		if i := strings.Index(vers, " "); i >= 0 {
+			vers = vers[:i]
+		}
+		if err := vcs.tagSync(root, selectTag(vers, tags)); err != nil {
+			return err
+		}
 	}
-	vers := runtime.Version()
-	if i := strings.Index(vers, " "); i >= 0 {
-		vers = vers[:i]
-	}
-	if err := vcs.tagSync(root, selectTag(vers, tags)); err != nil {
-		return err
-	}
-
 	return nil
 }
 

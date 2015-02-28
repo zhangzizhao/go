@@ -1,0 +1,792 @@
+From 5700f2bf2b5eadbb28562d6d9007d5cd4c18c83d Mon Sep 17 00:00:00 2001
+From: mattes <matthias.kadenbach@gmail.com>
+Date: Fri, 27 Feb 2015 18:00:10 +0100
+Subject: [PATCH 1/4] first idea
+
+---
+ src/cmd/go/get.go | 48 +++++++++++++++++++++++++++++++-----------------
+ src/cmd/go/vcs.go | 33 ++++++++++++---------------------
+ 2 files changed, 43 insertions(+), 38 deletions(-)
+
+diff --git a/src/cmd/go/get.go b/src/cmd/go/get.go
+index 50e0ca9..06dbf58 100644
+--- a/src/cmd/go/get.go
++++ b/src/cmd/go/get.go
+@@ -265,9 +265,9 @@ func download(arg string, stk *importStack, getTestDeps bool) {
+ // to make the first copy of or update a copy of the given package.
+ func downloadPackage(p *Package) error {
+ 	var (
+-		vcs            *vcsCmd
+-		repo, rootPath string
+-		err            error
++		vcs                      *vcsCmd
++		repo, rootPath, revision string
++		err                      error
+ 	)
+ 	if p.build.SrcRoot != "" {
+ 		// Directory exists.  Look for checkout along path to src.
+@@ -283,6 +283,7 @@ func downloadPackage(p *Package) error {
+ 			if remote, err := vcs.remoteRepo(vcs, dir); err == nil {
+ 				if rr, err := repoRootForImportPath(p.ImportPath); err == nil {
+ 					repo := rr.repo
++					revision = rr.revision
+ 					if rr.vcs.resolveRepo != nil {
+ 						resolved, err := rr.vcs.resolveRepo(rr.vcs, dir, repo)
+ 						if err == nil {
+@@ -302,7 +303,7 @@ func downloadPackage(p *Package) error {
+ 		if err != nil {
+ 			return err
+ 		}
+-		vcs, repo, rootPath = rr.vcs, rr.repo, rr.root
++		vcs, repo, rootPath, revision = rr.vcs, rr.repo, rr.root, rr.revision
+ 	}
+ 
+ 	if p.build.SrcRoot == "" {
+@@ -319,6 +320,9 @@ func downloadPackage(p *Package) error {
+ 		p.build.PkgRoot = filepath.Join(list[0], "pkg")
+ 	}
+ 	root := filepath.Join(p.build.SrcRoot, rootPath)
++	if revision != "" {
++		root += "#" + revision
++	}
+ 	// If we've considered this repository already, don't do it again.
+ 	if downloadRootCache[root] {
+ 		return nil
+@@ -326,7 +330,11 @@ func downloadPackage(p *Package) error {
+ 	downloadRootCache[root] = true
+ 
+ 	if buildV {
+-		fmt.Fprintf(os.Stderr, "%s (download)\n", rootPath)
++		if revision != "" {
++			fmt.Fprintf(os.Stderr, "%s#%s (download)\n", rootPath, revision)
++		} else {
++			fmt.Fprintf(os.Stderr, "%s (download)\n", rootPath)
++		}
+ 	}
+ 
+ 	// Check that this is an appropriate place for the repo to be checked out.
+@@ -366,19 +374,25 @@ func downloadPackage(p *Package) error {
+ 		return nil
+ 	}
+ 
+-	// Select and sync to appropriate version of the repository.
+-	tags, err := vcs.tags(root)
+-	if err != nil {
+-		return err
+-	}
+-	vers := runtime.Version()
+-	if i := strings.Index(vers, " "); i >= 0 {
+-		vers = vers[:i]
+-	}
+-	if err := vcs.tagSync(root, selectTag(vers, tags)); err != nil {
+-		return err
++	if revision != "" {
++		// Sync to repository revision.
++		if err := vcs.tagSync(root, revision); err != nil {
++			return err
++		}
++	} else {
++		// Select and sync to appropriate version of the repository.
++		tags, err := vcs.tags(root)
++		if err != nil {
++			return err
++		}
++		vers := runtime.Version()
++		if i := strings.Index(vers, " "); i >= 0 {
++			vers = vers[:i]
++		}
++		if err := vcs.tagSync(root, selectTag(vers, tags)); err != nil {
++			return err
++		}
+ 	}
+-
+ 	return nil
+ }
+ 
+diff --git a/src/cmd/go/vcs.go b/src/cmd/go/vcs.go
+index 1cac613..2602f31 100644
+--- a/src/cmd/go/vcs.go
++++ b/src/cmd/go/vcs.go
+@@ -386,20 +386,6 @@ func (v *vcsCmd) tagSync(dir, tag string) error {
+ 	if v.tagSyncCmd == "" {
+ 		return nil
+ 	}
+-	if tag != "" {
+-		for _, tc := range v.tagLookupCmd {
+-			out, err := v.runOutput(dir, tc.cmd, "tag", tag)
+-			if err != nil {
+-				return err
+-			}
+-			re := regexp.MustCompile(`(?m-s)` + tc.pattern)
+-			m := re.FindStringSubmatch(string(out))
+-			if len(m) > 1 {
+-				tag = m[1]
+-				break
+-			}
+-		}
+-	}
+ 	if tag == "" && v.tagSyncDefault != "" {
+ 		return v.run(dir, v.tagSyncDefault)
+ 	}
+@@ -463,6 +449,9 @@ type repoRoot struct {
+ 	// root is the import path corresponding to the root of the
+ 	// repository
+ 	root string
++
++	// revision to sync to after download
++	revision string
+ }
+ 
+ var httpPrefixRE = regexp.MustCompile(`^https?:`)
+@@ -567,9 +556,10 @@ func repoRootForImportPathStatic(importPath, scheme string) (*repoRoot, error) {
+ 			}
+ 		}
+ 		rr := &repoRoot{
+-			vcs:  vcs,
+-			repo: match["repo"],
+-			root: match["root"],
++			vcs:      vcs,
++			repo:     match["repo"],
++			root:     match["root"],
++			revision: strings.TrimPrefix(match["revision"], "#"),
+ 		}
+ 		return rr, nil
+ 	}
+@@ -640,9 +630,10 @@ func repoRootForImportDynamic(importPath string) (*repoRoot, error) {
+ 		return nil, fmt.Errorf("%s: invalid repo root %q; no scheme", urlStr, metaImport.RepoRoot)
+ 	}
+ 	rr := &repoRoot{
+-		vcs:  vcsByCmd(metaImport.VCS),
+-		repo: metaImport.RepoRoot,
+-		root: metaImport.Prefix,
++		vcs:      vcsByCmd(metaImport.VCS),
++		repo:     metaImport.RepoRoot,
++		root:     metaImport.Prefix,
++		revision: "hello", // TODO
+ 	}
+ 	if rr.vcs == nil {
+ 		return nil, fmt.Errorf("%s: unknown vcs %q", urlStr, metaImport.VCS)
+@@ -708,7 +699,7 @@ var vcsPaths = []*vcsPath{
+ 	// Github
+ 	{
+ 		prefix: "github.com/",
+-		re:     `^(?P<root>github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)(/[A-Za-z0-9_.\-]+)*$`,
++		re:     `^(?P<root>github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)(/[A-Za-z0-9_.\-]+)*(?P<revision>#[A-Za-z0-9]*)?$`,
+ 		vcs:    "git",
+ 		repo:   "https://{root}",
+ 		check:  noVCSSuffix,
+-- 
+2.1.2
+
+
+From dc1ca9622a121f196e18077e2daa690c3672c525 Mon Sep 17 00:00:00 2001
+From: mattes <matthias.kadenbach@gmail.com>
+Date: Fri, 27 Feb 2015 18:26:57 +0100
+Subject: [PATCH 2/4] add patch and some doc
+
+---
+ fix-dependencies.md    |  15 +++++
+ fix-dependencies.patch | 180 +++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 195 insertions(+)
+ create mode 100644 fix-dependencies.md
+ create mode 100644 fix-dependencies.patch
+
+diff --git a/fix-dependencies.md b/fix-dependencies.md
+new file mode 100644
+index 0000000..83cadd4
+--- /dev/null
++++ b/fix-dependencies.md
+@@ -0,0 +1,15 @@
++```bash
++# create patch
++git format-patch release-branch.go1.4 --stdout > fix-dependencies.patch
++
++# find original get.go and vcs.go and change to this directory
++cd /usr/local/Cellar/go/1.4.2/libexec/src/cmd/go
++
++# apply patch
++patch < fix-dependencies.patch
++
++# find make.bash and rebuild go
++cd /usr/local/Cellar/go/1.4.2/libexec/src
++./make.bash
++```
++
+diff --git a/fix-dependencies.patch b/fix-dependencies.patch
+new file mode 100644
+index 0000000..6712fab
+--- /dev/null
++++ b/fix-dependencies.patch
+@@ -0,0 +1,180 @@
++From 5700f2bf2b5eadbb28562d6d9007d5cd4c18c83d Mon Sep 17 00:00:00 2001
++From: mattes <matthias.kadenbach@gmail.com>
++Date: Fri, 27 Feb 2015 18:00:10 +0100
++Subject: [PATCH] first idea
++
++---
++ src/cmd/go/get.go | 48 +++++++++++++++++++++++++++++++-----------------
++ src/cmd/go/vcs.go | 33 ++++++++++++---------------------
++ 2 files changed, 43 insertions(+), 38 deletions(-)
++
++diff --git a/src/cmd/go/get.go b/src/cmd/go/get.go
++index 50e0ca9..06dbf58 100644
++--- a/src/cmd/go/get.go
+++++ b/src/cmd/go/get.go
++@@ -265,9 +265,9 @@ func download(arg string, stk *importStack, getTestDeps bool) {
++ // to make the first copy of or update a copy of the given package.
++ func downloadPackage(p *Package) error {
++ 	var (
++-		vcs            *vcsCmd
++-		repo, rootPath string
++-		err            error
+++		vcs                      *vcsCmd
+++		repo, rootPath, revision string
+++		err                      error
++ 	)
++ 	if p.build.SrcRoot != "" {
++ 		// Directory exists.  Look for checkout along path to src.
++@@ -283,6 +283,7 @@ func downloadPackage(p *Package) error {
++ 			if remote, err := vcs.remoteRepo(vcs, dir); err == nil {
++ 				if rr, err := repoRootForImportPath(p.ImportPath); err == nil {
++ 					repo := rr.repo
+++					revision = rr.revision
++ 					if rr.vcs.resolveRepo != nil {
++ 						resolved, err := rr.vcs.resolveRepo(rr.vcs, dir, repo)
++ 						if err == nil {
++@@ -302,7 +303,7 @@ func downloadPackage(p *Package) error {
++ 		if err != nil {
++ 			return err
++ 		}
++-		vcs, repo, rootPath = rr.vcs, rr.repo, rr.root
+++		vcs, repo, rootPath, revision = rr.vcs, rr.repo, rr.root, rr.revision
++ 	}
++ 
++ 	if p.build.SrcRoot == "" {
++@@ -319,6 +320,9 @@ func downloadPackage(p *Package) error {
++ 		p.build.PkgRoot = filepath.Join(list[0], "pkg")
++ 	}
++ 	root := filepath.Join(p.build.SrcRoot, rootPath)
+++	if revision != "" {
+++		root += "#" + revision
+++	}
++ 	// If we've considered this repository already, don't do it again.
++ 	if downloadRootCache[root] {
++ 		return nil
++@@ -326,7 +330,11 @@ func downloadPackage(p *Package) error {
++ 	downloadRootCache[root] = true
++ 
++ 	if buildV {
++-		fmt.Fprintf(os.Stderr, "%s (download)\n", rootPath)
+++		if revision != "" {
+++			fmt.Fprintf(os.Stderr, "%s#%s (download)\n", rootPath, revision)
+++		} else {
+++			fmt.Fprintf(os.Stderr, "%s (download)\n", rootPath)
+++		}
++ 	}
++ 
++ 	// Check that this is an appropriate place for the repo to be checked out.
++@@ -366,19 +374,25 @@ func downloadPackage(p *Package) error {
++ 		return nil
++ 	}
++ 
++-	// Select and sync to appropriate version of the repository.
++-	tags, err := vcs.tags(root)
++-	if err != nil {
++-		return err
++-	}
++-	vers := runtime.Version()
++-	if i := strings.Index(vers, " "); i >= 0 {
++-		vers = vers[:i]
++-	}
++-	if err := vcs.tagSync(root, selectTag(vers, tags)); err != nil {
++-		return err
+++	if revision != "" {
+++		// Sync to repository revision.
+++		if err := vcs.tagSync(root, revision); err != nil {
+++			return err
+++		}
+++	} else {
+++		// Select and sync to appropriate version of the repository.
+++		tags, err := vcs.tags(root)
+++		if err != nil {
+++			return err
+++		}
+++		vers := runtime.Version()
+++		if i := strings.Index(vers, " "); i >= 0 {
+++			vers = vers[:i]
+++		}
+++		if err := vcs.tagSync(root, selectTag(vers, tags)); err != nil {
+++			return err
+++		}
++ 	}
++-
++ 	return nil
++ }
++ 
++diff --git a/src/cmd/go/vcs.go b/src/cmd/go/vcs.go
++index 1cac613..2602f31 100644
++--- a/src/cmd/go/vcs.go
+++++ b/src/cmd/go/vcs.go
++@@ -386,20 +386,6 @@ func (v *vcsCmd) tagSync(dir, tag string) error {
++ 	if v.tagSyncCmd == "" {
++ 		return nil
++ 	}
++-	if tag != "" {
++-		for _, tc := range v.tagLookupCmd {
++-			out, err := v.runOutput(dir, tc.cmd, "tag", tag)
++-			if err != nil {
++-				return err
++-			}
++-			re := regexp.MustCompile(`(?m-s)` + tc.pattern)
++-			m := re.FindStringSubmatch(string(out))
++-			if len(m) > 1 {
++-				tag = m[1]
++-				break
++-			}
++-		}
++-	}
++ 	if tag == "" && v.tagSyncDefault != "" {
++ 		return v.run(dir, v.tagSyncDefault)
++ 	}
++@@ -463,6 +449,9 @@ type repoRoot struct {
++ 	// root is the import path corresponding to the root of the
++ 	// repository
++ 	root string
+++
+++	// revision to sync to after download
+++	revision string
++ }
++ 
++ var httpPrefixRE = regexp.MustCompile(`^https?:`)
++@@ -567,9 +556,10 @@ func repoRootForImportPathStatic(importPath, scheme string) (*repoRoot, error) {
++ 			}
++ 		}
++ 		rr := &repoRoot{
++-			vcs:  vcs,
++-			repo: match["repo"],
++-			root: match["root"],
+++			vcs:      vcs,
+++			repo:     match["repo"],
+++			root:     match["root"],
+++			revision: strings.TrimPrefix(match["revision"], "#"),
++ 		}
++ 		return rr, nil
++ 	}
++@@ -640,9 +630,10 @@ func repoRootForImportDynamic(importPath string) (*repoRoot, error) {
++ 		return nil, fmt.Errorf("%s: invalid repo root %q; no scheme", urlStr, metaImport.RepoRoot)
++ 	}
++ 	rr := &repoRoot{
++-		vcs:  vcsByCmd(metaImport.VCS),
++-		repo: metaImport.RepoRoot,
++-		root: metaImport.Prefix,
+++		vcs:      vcsByCmd(metaImport.VCS),
+++		repo:     metaImport.RepoRoot,
+++		root:     metaImport.Prefix,
+++		revision: "hello", // TODO
++ 	}
++ 	if rr.vcs == nil {
++ 		return nil, fmt.Errorf("%s: unknown vcs %q", urlStr, metaImport.VCS)
++@@ -708,7 +699,7 @@ var vcsPaths = []*vcsPath{
++ 	// Github
++ 	{
++ 		prefix: "github.com/",
++-		re:     `^(?P<root>github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)(/[A-Za-z0-9_.\-]+)*$`,
+++		re:     `^(?P<root>github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)(/[A-Za-z0-9_.\-]+)*(?P<revision>#[A-Za-z0-9]*)?$`,
++ 		vcs:    "git",
++ 		repo:   "https://{root}",
++ 		check:  noVCSSuffix,
++-- 
++2.1.2
++
+-- 
+2.1.2
+
+
+From 7232669475d8e9f8c79fd7e2cbc35190a982f7af Mon Sep 17 00:00:00 2001
+From: mattes <matthias.kadenbach@gmail.com>
+Date: Fri, 27 Feb 2015 18:41:18 +0100
+Subject: [PATCH 3/4] update regex
+
+---
+ src/cmd/go/vcs.go | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/cmd/go/vcs.go b/src/cmd/go/vcs.go
+index 2602f31..5f5a806 100644
+--- a/src/cmd/go/vcs.go
++++ b/src/cmd/go/vcs.go
+@@ -699,7 +699,7 @@ var vcsPaths = []*vcsPath{
+ 	// Github
+ 	{
+ 		prefix: "github.com/",
+-		re:     `^(?P<root>github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)(/[A-Za-z0-9_.\-]+)*(?P<revision>#[A-Za-z0-9]*)?$`,
++		re:     `^(?P<root>github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)(/[A-Za-z0-9_.\-]+)*(?P<revision>#[^ ]*)?$`,
+ 		vcs:    "git",
+ 		repo:   "https://{root}",
+ 		check:  noVCSSuffix,
+-- 
+2.1.2
+
+
+From 115a5e850b82f1a4d3bb576104cba01c9257c25d Mon Sep 17 00:00:00 2001
+From: mattes <matthias.kadenbach@gmail.com>
+Date: Sat, 28 Feb 2015 00:41:37 +0100
+Subject: [PATCH 4/4] update readme
+
+---
+ fix-dependencies.md    |  36 ++++++-
+ fix-dependencies.patch | 251 ++++++++++++++++++++++++++++++++++++++++++++++++-
+ src/cmd/go/vcs.go      |  11 ++-
+ 3 files changed, 294 insertions(+), 4 deletions(-)
+
+diff --git a/fix-dependencies.md b/fix-dependencies.md
+index 83cadd4..61e22db 100644
+--- a/fix-dependencies.md
++++ b/fix-dependencies.md
+@@ -1,9 +1,43 @@
++# Golang Dependency Management Patch
++
++Lock Golang packages by adding ``#revision`` to the import path. 
++
++```bash
++go get github.com/mattes/migrate#v1.2.0
++```
++
++The command above would clone the ``migrate`` package to 
++``$GOPATH/src/github.com/mattes/migrate#v1.2.0`` and checkout ``v1.2.0``.
++
++Use multiple versions of the same package in the same project or in
++different projects. No need to modify ``$GOPATH``!
++
++```go
++import (
++  "github.com/mattes/migrate" // latest master branch
++  oldMigrateAlias "github.com/mattes/migrate#v1.2.0"
++  anotherAlias "github.com/mattes/migrate#c1f0a1a04441f8508826792616a6cb0f65968283"
++)
++```
++
++### This is experimental ...
++
++Not sure if it makes sense at all as this would break
++the existing ``go get`` implementation.
++
++Tested a little bit with ``go version go1.4.2 darwin/amd64``.
++
++__PRs/ Feedback/ Ideas welcome!__
++
++
++## Apply patch
++
+ ```bash
+ # create patch
+ git format-patch release-branch.go1.4 --stdout > fix-dependencies.patch
+ 
+ # find original get.go and vcs.go and change to this directory
+-cd /usr/local/Cellar/go/1.4.2/libexec/src/cmd/go
++cd /usr/local/Cellar/go/1.4.2/libexec/src/cmd/go # if installed with brew
+ 
+ # apply patch
+ patch < fix-dependencies.patch
+diff --git a/fix-dependencies.patch b/fix-dependencies.patch
+index 6712fab..b986291 100644
+--- a/fix-dependencies.patch
++++ b/fix-dependencies.patch
+@@ -1,7 +1,7 @@
+ From 5700f2bf2b5eadbb28562d6d9007d5cd4c18c83d Mon Sep 17 00:00:00 2001
+ From: mattes <matthias.kadenbach@gmail.com>
+ Date: Fri, 27 Feb 2015 18:00:10 +0100
+-Subject: [PATCH] first idea
++Subject: [PATCH 1/3] first idea
+ 
+ ---
+  src/cmd/go/get.go | 48 +++++++++++++++++++++++++++++++-----------------
+@@ -178,3 +178,252 @@ index 1cac613..2602f31 100644
+ -- 
+ 2.1.2
+ 
++
++From dc1ca9622a121f196e18077e2daa690c3672c525 Mon Sep 17 00:00:00 2001
++From: mattes <matthias.kadenbach@gmail.com>
++Date: Fri, 27 Feb 2015 18:26:57 +0100
++Subject: [PATCH 2/3] add patch and some doc
++
++---
++ fix-dependencies.md    |  15 +++++
++ fix-dependencies.patch | 180 +++++++++++++++++++++++++++++++++++++++++++++++++
++ 2 files changed, 195 insertions(+)
++ create mode 100644 fix-dependencies.md
++ create mode 100644 fix-dependencies.patch
++
++diff --git a/fix-dependencies.md b/fix-dependencies.md
++new file mode 100644
++index 0000000..83cadd4
++--- /dev/null
+++++ b/fix-dependencies.md
++@@ -0,0 +1,15 @@
+++```bash
+++# create patch
+++git format-patch release-branch.go1.4 --stdout > fix-dependencies.patch
+++
+++# find original get.go and vcs.go and change to this directory
+++cd /usr/local/Cellar/go/1.4.2/libexec/src/cmd/go
+++
+++# apply patch
+++patch < fix-dependencies.patch
+++
+++# find make.bash and rebuild go
+++cd /usr/local/Cellar/go/1.4.2/libexec/src
+++./make.bash
+++```
+++
++diff --git a/fix-dependencies.patch b/fix-dependencies.patch
++new file mode 100644
++index 0000000..6712fab
++--- /dev/null
+++++ b/fix-dependencies.patch
++@@ -0,0 +1,180 @@
+++From 5700f2bf2b5eadbb28562d6d9007d5cd4c18c83d Mon Sep 17 00:00:00 2001
+++From: mattes <matthias.kadenbach@gmail.com>
+++Date: Fri, 27 Feb 2015 18:00:10 +0100
+++Subject: [PATCH] first idea
+++
+++---
+++ src/cmd/go/get.go | 48 +++++++++++++++++++++++++++++++-----------------
+++ src/cmd/go/vcs.go | 33 ++++++++++++---------------------
+++ 2 files changed, 43 insertions(+), 38 deletions(-)
+++
+++diff --git a/src/cmd/go/get.go b/src/cmd/go/get.go
+++index 50e0ca9..06dbf58 100644
+++--- a/src/cmd/go/get.go
++++++ b/src/cmd/go/get.go
+++@@ -265,9 +265,9 @@ func download(arg string, stk *importStack, getTestDeps bool) {
+++ // to make the first copy of or update a copy of the given package.
+++ func downloadPackage(p *Package) error {
+++ 	var (
+++-		vcs            *vcsCmd
+++-		repo, rootPath string
+++-		err            error
++++		vcs                      *vcsCmd
++++		repo, rootPath, revision string
++++		err                      error
+++ 	)
+++ 	if p.build.SrcRoot != "" {
+++ 		// Directory exists.  Look for checkout along path to src.
+++@@ -283,6 +283,7 @@ func downloadPackage(p *Package) error {
+++ 			if remote, err := vcs.remoteRepo(vcs, dir); err == nil {
+++ 				if rr, err := repoRootForImportPath(p.ImportPath); err == nil {
+++ 					repo := rr.repo
++++					revision = rr.revision
+++ 					if rr.vcs.resolveRepo != nil {
+++ 						resolved, err := rr.vcs.resolveRepo(rr.vcs, dir, repo)
+++ 						if err == nil {
+++@@ -302,7 +303,7 @@ func downloadPackage(p *Package) error {
+++ 		if err != nil {
+++ 			return err
+++ 		}
+++-		vcs, repo, rootPath = rr.vcs, rr.repo, rr.root
++++		vcs, repo, rootPath, revision = rr.vcs, rr.repo, rr.root, rr.revision
+++ 	}
+++ 
+++ 	if p.build.SrcRoot == "" {
+++@@ -319,6 +320,9 @@ func downloadPackage(p *Package) error {
+++ 		p.build.PkgRoot = filepath.Join(list[0], "pkg")
+++ 	}
+++ 	root := filepath.Join(p.build.SrcRoot, rootPath)
++++	if revision != "" {
++++		root += "#" + revision
++++	}
+++ 	// If we've considered this repository already, don't do it again.
+++ 	if downloadRootCache[root] {
+++ 		return nil
+++@@ -326,7 +330,11 @@ func downloadPackage(p *Package) error {
+++ 	downloadRootCache[root] = true
+++ 
+++ 	if buildV {
+++-		fmt.Fprintf(os.Stderr, "%s (download)\n", rootPath)
++++		if revision != "" {
++++			fmt.Fprintf(os.Stderr, "%s#%s (download)\n", rootPath, revision)
++++		} else {
++++			fmt.Fprintf(os.Stderr, "%s (download)\n", rootPath)
++++		}
+++ 	}
+++ 
+++ 	// Check that this is an appropriate place for the repo to be checked out.
+++@@ -366,19 +374,25 @@ func downloadPackage(p *Package) error {
+++ 		return nil
+++ 	}
+++ 
+++-	// Select and sync to appropriate version of the repository.
+++-	tags, err := vcs.tags(root)
+++-	if err != nil {
+++-		return err
+++-	}
+++-	vers := runtime.Version()
+++-	if i := strings.Index(vers, " "); i >= 0 {
+++-		vers = vers[:i]
+++-	}
+++-	if err := vcs.tagSync(root, selectTag(vers, tags)); err != nil {
+++-		return err
++++	if revision != "" {
++++		// Sync to repository revision.
++++		if err := vcs.tagSync(root, revision); err != nil {
++++			return err
++++		}
++++	} else {
++++		// Select and sync to appropriate version of the repository.
++++		tags, err := vcs.tags(root)
++++		if err != nil {
++++			return err
++++		}
++++		vers := runtime.Version()
++++		if i := strings.Index(vers, " "); i >= 0 {
++++			vers = vers[:i]
++++		}
++++		if err := vcs.tagSync(root, selectTag(vers, tags)); err != nil {
++++			return err
++++		}
+++ 	}
+++-
+++ 	return nil
+++ }
+++ 
+++diff --git a/src/cmd/go/vcs.go b/src/cmd/go/vcs.go
+++index 1cac613..2602f31 100644
+++--- a/src/cmd/go/vcs.go
++++++ b/src/cmd/go/vcs.go
+++@@ -386,20 +386,6 @@ func (v *vcsCmd) tagSync(dir, tag string) error {
+++ 	if v.tagSyncCmd == "" {
+++ 		return nil
+++ 	}
+++-	if tag != "" {
+++-		for _, tc := range v.tagLookupCmd {
+++-			out, err := v.runOutput(dir, tc.cmd, "tag", tag)
+++-			if err != nil {
+++-				return err
+++-			}
+++-			re := regexp.MustCompile(`(?m-s)` + tc.pattern)
+++-			m := re.FindStringSubmatch(string(out))
+++-			if len(m) > 1 {
+++-				tag = m[1]
+++-				break
+++-			}
+++-		}
+++-	}
+++ 	if tag == "" && v.tagSyncDefault != "" {
+++ 		return v.run(dir, v.tagSyncDefault)
+++ 	}
+++@@ -463,6 +449,9 @@ type repoRoot struct {
+++ 	// root is the import path corresponding to the root of the
+++ 	// repository
+++ 	root string
++++
++++	// revision to sync to after download
++++	revision string
+++ }
+++ 
+++ var httpPrefixRE = regexp.MustCompile(`^https?:`)
+++@@ -567,9 +556,10 @@ func repoRootForImportPathStatic(importPath, scheme string) (*repoRoot, error) {
+++ 			}
+++ 		}
+++ 		rr := &repoRoot{
+++-			vcs:  vcs,
+++-			repo: match["repo"],
+++-			root: match["root"],
++++			vcs:      vcs,
++++			repo:     match["repo"],
++++			root:     match["root"],
++++			revision: strings.TrimPrefix(match["revision"], "#"),
+++ 		}
+++ 		return rr, nil
+++ 	}
+++@@ -640,9 +630,10 @@ func repoRootForImportDynamic(importPath string) (*repoRoot, error) {
+++ 		return nil, fmt.Errorf("%s: invalid repo root %q; no scheme", urlStr, metaImport.RepoRoot)
+++ 	}
+++ 	rr := &repoRoot{
+++-		vcs:  vcsByCmd(metaImport.VCS),
+++-		repo: metaImport.RepoRoot,
+++-		root: metaImport.Prefix,
++++		vcs:      vcsByCmd(metaImport.VCS),
++++		repo:     metaImport.RepoRoot,
++++		root:     metaImport.Prefix,
++++		revision: "hello", // TODO
+++ 	}
+++ 	if rr.vcs == nil {
+++ 		return nil, fmt.Errorf("%s: unknown vcs %q", urlStr, metaImport.VCS)
+++@@ -708,7 +699,7 @@ var vcsPaths = []*vcsPath{
+++ 	// Github
+++ 	{
+++ 		prefix: "github.com/",
+++-		re:     `^(?P<root>github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)(/[A-Za-z0-9_.\-]+)*$`,
++++		re:     `^(?P<root>github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)(/[A-Za-z0-9_.\-]+)*(?P<revision>#[A-Za-z0-9]*)?$`,
+++ 		vcs:    "git",
+++ 		repo:   "https://{root}",
+++ 		check:  noVCSSuffix,
+++-- 
+++2.1.2
+++
++-- 
++2.1.2
++
++
++From 7232669475d8e9f8c79fd7e2cbc35190a982f7af Mon Sep 17 00:00:00 2001
++From: mattes <matthias.kadenbach@gmail.com>
++Date: Fri, 27 Feb 2015 18:41:18 +0100
++Subject: [PATCH 3/3] update regex
++
++---
++ src/cmd/go/vcs.go | 2 +-
++ 1 file changed, 1 insertion(+), 1 deletion(-)
++
++diff --git a/src/cmd/go/vcs.go b/src/cmd/go/vcs.go
++index 2602f31..5f5a806 100644
++--- a/src/cmd/go/vcs.go
+++++ b/src/cmd/go/vcs.go
++@@ -699,7 +699,7 @@ var vcsPaths = []*vcsPath{
++ 	// Github
++ 	{
++ 		prefix: "github.com/",
++-		re:     `^(?P<root>github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)(/[A-Za-z0-9_.\-]+)*(?P<revision>#[A-Za-z0-9]*)?$`,
+++		re:     `^(?P<root>github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)(/[A-Za-z0-9_.\-]+)*(?P<revision>#[^ ]*)?$`,
++ 		vcs:    "git",
++ 		repo:   "https://{root}",
++ 		check:  noVCSSuffix,
++-- 
++2.1.2
++
+diff --git a/src/cmd/go/vcs.go b/src/cmd/go/vcs.go
+index 5f5a806..9cf804d 100644
+--- a/src/cmd/go/vcs.go
++++ b/src/cmd/go/vcs.go
+@@ -629,11 +629,18 @@ func repoRootForImportDynamic(importPath string) (*repoRoot, error) {
+ 	if !strings.Contains(metaImport.RepoRoot, "://") {
+ 		return nil, fmt.Errorf("%s: invalid repo root %q; no scheme", urlStr, metaImport.RepoRoot)
+ 	}
++
++	var revision string
++	revRe := regexp.MustCompile("#([^ ]+)$").FindAllString(importPath, 1)
++	if len(revRe) == 1 {
++		revision = strings.TrimPrefix(revRe[0], "#")
++	}
++
+ 	rr := &repoRoot{
+ 		vcs:      vcsByCmd(metaImport.VCS),
+ 		repo:     metaImport.RepoRoot,
+ 		root:     metaImport.Prefix,
+-		revision: "hello", // TODO
++		revision: revision,
+ 	}
+ 	if rr.vcs == nil {
+ 		return nil, fmt.Errorf("%s: unknown vcs %q", urlStr, metaImport.VCS)
+@@ -699,7 +706,7 @@ var vcsPaths = []*vcsPath{
+ 	// Github
+ 	{
+ 		prefix: "github.com/",
+-		re:     `^(?P<root>github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)(/[A-Za-z0-9_.\-]+)*(?P<revision>#[^ ]*)?$`,
++		re:     `^(?P<root>github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)(/[A-Za-z0-9_.\-]+)*(?P<revision>#[^ ]+)?$`,
+ 		vcs:    "git",
+ 		repo:   "https://{root}",
+ 		check:  noVCSSuffix,
+-- 
+2.1.2
+
